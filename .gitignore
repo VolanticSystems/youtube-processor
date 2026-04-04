@@ -1,0 +1,25 @@
+# Virtual environment
+venv/
+
+# Library data (video files, transcripts, summaries)
+library/
+
+# WinSW binary, config (contains API key), and logs
+youtube-processor-service.exe
+youtube-processor-service.xml
+youtube-processor-service.out.log
+youtube-processor-service.err.log
+youtube-processor-service.wrapper.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Prototyping / scratch
+prototyping/
+turds/
+chapters/
+
+# Benchmark temp files
+benchmark_*.html

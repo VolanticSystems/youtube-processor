@@ -1,0 +1,7 @@
+# YouTube Processor Configuration
+model: deepseek/deepseek-v3.2
+chunk_minutes: 10
+max_summary_tokens: 32000
+max_clean_tokens: 6000
+output_dir: ./library
+port: 5000
