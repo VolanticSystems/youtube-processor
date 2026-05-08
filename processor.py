@@ -12,6 +12,29 @@ import yaml
 import yt_dlp
 
 
+# IPVanish SOCKS5 proxy rotation (Europe + US East Coast)
+_PROXY_SERVERS = [
+    "ams", "iad", "lon", "fra", "par", "nyc", "ber", "bru",
+    "mad", "atl", "chi", "dub", "mia", "sto", "vie",
+]
+_PROXY_CREDS = "***REMOVED***"
+_proxy_index = 0
+
+
+def _get_proxy():
+    """Get the current SOCKS5 proxy URL."""
+    global _proxy_index
+    server = _PROXY_SERVERS[_proxy_index % len(_PROXY_SERVERS)]
+    return f"socks5://{_PROXY_CREDS}@{server}.socks.example.com:1080"
+
+
+def _rotate_proxy():
+    """Switch to the next proxy server."""
+    global _proxy_index
+    _proxy_index = (_proxy_index + 1) % len(_PROXY_SERVERS)
+    return _get_proxy()
+
+
 def load_config():
     config_path = Path(__file__).parent / "config.yaml"
     with open(config_path, "r") as f:
@@ -56,40 +79,81 @@ def fetch_video_title(video_id):
     return f"Video {video_id}"
 
 
-def fetch_transcript(video_id):
-    """Fetch transcript segments from YouTube via yt-dlp with Firefox cookie auth."""
+def fetch_upload_date(video_id):
+    """Return upload date as 'YYYY-MM-DD' string, or empty string on failure.
+
+    Best-effort, non-fatal. Uses proxy rotation via fetch_chapters' opts pattern.
+    """
+    base_opts = {
+        "quiet": True, "no_warnings": True, "skip_download": True,
+        "cookiesfrombrowser": ("firefox",),
+        "js_runtimes": {"node": {}},
+    }
+    for attempt in range(len(_PROXY_SERVERS)):
+        try:
+            opts = dict(base_opts, proxy=_get_proxy())
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False, process=False)
+                ud = info.get("upload_date") or ""
+                if len(ud) == 8:
+                    return f"{ud[:4]}-{ud[4:6]}-{ud[6:]}"
+                return ""
+        except Exception as e:
+            err_str = str(e).lower()
+            if ("429" in err_str or "bot" in err_str or "sign in" in err_str) and attempt < len(_PROXY_SERVERS) - 1:
+                _rotate_proxy()
+                continue
+            return ""
+    return ""
+
+
+def fetch_transcript(video_id, lang="en"):
+    """Fetch transcript segments from YouTube via yt-dlp with Firefox cookie auth and proxy."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    opts = {
+    base_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "writeautomaticsub": True,
         "writesubtitles": True,
-        "subtitleslangs": ["en"],
+        "subtitleslangs": [lang],
         "subtitlesformat": "json3",
         "cookiesfrombrowser": ("firefox",),
+        "js_runtimes": {"node": {}},
     }
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False, process=False)
-
-    # Look for English subtitles: prefer manual, fall back to auto-generated
-    subs = info.get("subtitles", {}) or {}
-    auto = info.get("automatic_captions", {}) or {}
-    en_entries = subs.get("en") or auto.get("en") or []
-
+    last_error = None
+    info = None
     json3_url = None
-    for fmt in en_entries:
-        if fmt.get("ext") == "json3":
-            json3_url = fmt["url"]
-            break
 
-    if not json3_url:
-        raise ValueError(f"No English subtitles available for {video_id}")
-
-    resp = requests.get(json3_url, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    # Try up to all proxies, rotating on bot/rate-limit errors
+    for attempt in range(len(_PROXY_SERVERS)):
+        opts = dict(base_opts, proxy=_get_proxy())
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False, process=False)
+                subs = info.get("subtitles", {}) or {}
+                auto = info.get("automatic_captions", {}) or {}
+                lang_entries = subs.get(lang) or auto.get(lang) or []
+                for fmt in lang_entries:
+                    if fmt.get("ext") == "json3":
+                        json3_url = fmt["url"]
+                        break
+                if not json3_url:
+                    raise ValueError(f"No {lang} subtitles available for {video_id}")
+                data_bytes = ydl.urlopen(json3_url).read()
+                data = json.loads(data_bytes)
+                break
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            if ("429" in err_str or "bot" in err_str or "sign in" in err_str) and attempt < len(_PROXY_SERVERS) - 1:
+                _rotate_proxy()
+                time.sleep(2)
+                continue
+            raise
+    else:
+        raise last_error if last_error else RuntimeError("All proxies exhausted")
 
     segments = []
     for event in data.get("events", []):
@@ -113,72 +177,353 @@ def fetch_transcript(video_id):
 
 def fetch_chapters(video_id):
     """Fetch chapter markers from YouTube video metadata via yt-dlp. Returns list of {start, title} or empty list."""
-    try:
-        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "cookiesfrombrowser": ("firefox",)}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False, process=False)
-            chapters = info.get("chapters") or []
-            return [{"start": ch["start_time"], "title": ch["title"]} for ch in chapters]
-    except Exception:
-        return []
+    base_opts = {
+        "quiet": True, "no_warnings": True, "skip_download": True,
+        "cookiesfrombrowser": ("firefox",),
+        "js_runtimes": {"node": {}},
+    }
+    for attempt in range(len(_PROXY_SERVERS)):
+        try:
+            opts = dict(base_opts, proxy=_get_proxy())
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False, process=False)
+                chapters = info.get("chapters") or []
+                return [{"start": ch["start_time"], "title": ch["title"]} for ch in chapters]
+        except Exception as e:
+            err_str = str(e).lower()
+            if ("429" in err_str or "bot" in err_str or "sign in" in err_str) and attempt < len(_PROXY_SERVERS) - 1:
+                _rotate_proxy()
+                continue
+            return []
+    return []
 
 
 def download_video(video_id, output_dir, progress_callback=None):
-    """Download video at up to 1080p using yt-dlp. Returns path to video file."""
+    """Download video at up to 1080p using yt-dlp, plus English subtitles as VTT."""
     output_dir = Path(output_dir)
     video_path = output_dir / "video.mp4"
+    subs_path = output_dir / "subs_en.vtt"
+
     if video_path.exists():
         if progress_callback:
             progress_callback("Video already cached.")
-        return str(video_path)
+    else:
+        if progress_callback:
+            progress_callback("Downloading video...")
 
-    if progress_callback:
-        progress_callback("Downloading video...")
+        hooks = []
+        if progress_callback:
+            def hook(d):
+                if d["status"] == "downloading":
+                    pct = d.get("_percent_str", "").strip()
+                    progress_callback(f"Downloading video... {pct}")
+                elif d["status"] == "finished":
+                    progress_callback("Processing video...")
+            hooks.append(hook)
 
-    hooks = []
-    if progress_callback:
-        def hook(d):
-            if d["status"] == "downloading":
-                pct = d.get("_percent_str", "").strip()
-                progress_callback(f"Downloading video... {pct}")
-            elif d["status"] == "finished":
-                progress_callback("Processing video...")
-        hooks.append(hook)
+        base_opts = {
+            "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            "merge_output_format": "mp4",
+            "outtmpl": str(output_dir / "video.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": hooks,
+            "cookiesfrombrowser": ("firefox",),
+            "js_runtimes": {"node": {}},
+        }
 
-    opts = {
-        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        "merge_output_format": "mp4",
-        "outtmpl": str(output_dir / "video.%(ext)s"),
-        "quiet": True,
-        "no_warnings": True,
-        "progress_hooks": hooks,
-    }
+        last_error = None
+        for attempt in range(len(_PROXY_SERVERS)):
+            opts = dict(base_opts, proxy=_get_proxy())
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+                break
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                if ("429" in err_str or "bot" in err_str or "sign in" in err_str) and attempt < len(_PROXY_SERVERS) - 1:
+                    _rotate_proxy()
+                    continue
+                raise
+        else:
+            raise last_error if last_error else RuntimeError("All proxies exhausted")
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+    # Download English subtitles separately (non-fatal if it fails)
+    if not subs_path.exists():
+        # Check source_lang from meta.json. For English source, just convert the
+        # existing transcript JSON to VTT directly — no AI translation needed.
+        meta_path = output_dir / "meta.json"
+        source_lang = "en"
+        if meta_path.exists():
+            try:
+                with open(meta_path) as f:
+                    source_lang = json.load(f).get("source_lang", "en")
+            except Exception:
+                pass
+
+        if source_lang == "en":
+            transcript_files = list(output_dir.glob("transcript - *.json"))
+            if transcript_files:
+                try:
+                    transcript_segments_to_vtt(str(transcript_files[0]), str(subs_path))
+                    if progress_callback:
+                        progress_callback("English subtitles generated from transcript.")
+                except Exception:
+                    pass
+        else:
+            # Non-English source: AI-translate the source transcript into English VTT.
+            transcript_files = list(output_dir.glob("transcript - *.json"))
+            if transcript_files:
+                try:
+                    generate_translated_vtt(str(transcript_files[0]), str(subs_path), progress_callback)
+                except Exception:
+                    pass
 
     return str(video_path)
 
 
+def transcript_segments_to_vtt(transcript_json_path, vtt_output_path):
+    """Convert a same-language transcript JSON directly to WEBVTT (no translation).
+
+    Filters out non-speech annotations like [Music] / [Applause] and trims
+    overlapping cue end times so subtitles render cleanly in HTML5 players.
+    """
+    with open(transcript_json_path, "r", encoding="utf-8") as f:
+        segments = json.load(f)
+
+    segments = [
+        s for s in segments
+        if not re.match(r"^\s*\[.*\]\s*$", s["text"])
+        and s["text"].strip()
+    ]
+
+    with open(vtt_output_path, "w", encoding="utf-8") as f:
+        f.write("WEBVTT\n\n")
+        last_speaker = None
+        for i, seg in enumerate(segments):
+            start = seg["start"]
+            if i + 1 < len(segments):
+                end = min(start + seg["duration"], segments[i + 1]["start"])
+            else:
+                end = start + seg["duration"]
+            if end - start < 0.5:
+                end = start + 0.5
+            f.write(f"{_format_vtt_time(start)} --> {_format_vtt_time(end)}\n")
+            speaker = seg.get("speaker")
+            text = seg["text"]
+            if speaker and speaker != "Unknown" and speaker != last_speaker:
+                text = f"[{speaker}] {text}"
+                last_speaker = speaker
+            f.write(f"{text}\n\n")
+
+
+def generate_translated_vtt(transcript_json_path, vtt_output_path, progress_callback=None):
+    """Translate transcript segments to English with overlapping chunks and cleanup pass."""
+    with open(transcript_json_path, "r", encoding="utf-8") as f:
+        segments = json.load(f)
+
+    CHUNK_SIZE = 50
+    OVERLAP = 25  # each segment appears in two chunks
+
+    # Build overlapping chunks
+    chunks = []
+    start = 0
+    while start < len(segments):
+        end = min(start + CHUNK_SIZE, len(segments))
+        chunks.append((start, segments[start:end]))
+        start += OVERLAP
+        if end >= len(segments):
+            break
+
+    config = load_config()
+    PROTECTED_TERMS = "***REMOVED***"
+
+    # First pass: translate all chunks, collecting two translations per overlapping segment
+    translations_a = {}  # segment global index -> text (from first chunk)
+    translations_b = {}  # segment global index -> text (from second chunk)
+
+    for ci, (chunk_start, chunk) in enumerate(chunks):
+        if progress_callback:
+            progress_callback(f"Translating pass 1: chunk {ci+1}/{len(chunks)}...")
+
+        lines = []
+        for j, seg in enumerate(chunk):
+            lines.append(f"[{j}] {seg['text']}")
+        text_block = "\n".join(lines)
+
+        prompt = f"""Translate the following Dutch subtitle lines to English. Maintain the [N] index prefix on each line exactly as shown. Translate accurately, preserving medical and technical terminology. IMPORTANT: Do NOT translate or alter these terms: {PROTECTED_TERMS}. Output ONLY the translated lines, nothing else.
+
+{text_block}"""
+
+        content, _ = call_openrouter(
+            config["model"],
+            [{"role": "user", "content": prompt}],
+            max_tokens=len(chunk) * 100,
+            timeout=180,
+            purpose="subtitle_translation",
+            video_id="",
+        )
+
+        parsed = {}
+        for line in content.strip().split("\n"):
+            m = re.match(r"\[(\d+)\]\s*(.*)", line)
+            if m:
+                parsed[int(m.group(1))] = m.group(2)
+
+        for j, seg in enumerate(chunk):
+            global_idx = chunk_start + j
+            text = parsed.get(j, seg["text"])
+            if global_idx not in translations_a:
+                translations_a[global_idx] = text
+            else:
+                translations_b[global_idx] = text
+
+    # Pick best translation for each segment (prefer the one that's actually English)
+    translated_segments = []
+    for i, seg in enumerate(segments):
+        a = translations_a.get(i, seg["text"])
+        b = translations_b.get(i, a)
+        # Simple heuristic: if one looks Dutch (has common Dutch words), prefer the other
+        dutch_markers = ["de ", "het ", "een ", "van ", "dat ", "voor ", "maar ", "niet ", "ook ", "met "]
+        a_dutch = sum(1 for m in dutch_markers if m in a.lower())
+        b_dutch = sum(1 for m in dutch_markers if m in b.lower())
+        best = b if a_dutch > b_dutch else a
+        translated_segments.append({
+            "start": seg["start"],
+            "duration": seg["duration"],
+            "text": best,
+        })
+
+    # Second pass: cleanup against Dutch source
+    if progress_callback:
+        progress_callback("Cleanup pass: polishing translation...")
+
+    # Build side-by-side for cleanup in chunks
+    cleanup_chunks = []
+    for i in range(0, len(translated_segments), 80):
+        cleanup_chunks.append(translated_segments[i:i+80])
+
+    polished_segments = []
+    for ci, chunk in enumerate(cleanup_chunks):
+        if progress_callback:
+            progress_callback(f"Cleanup pass {ci+1}/{len(cleanup_chunks)}...")
+
+        lines = []
+        for j, seg in enumerate(chunk):
+            global_idx = len(polished_segments) + j
+            dutch_text = segments[global_idx]["text"]
+            lines.append(f"[{j}] NL: {dutch_text}")
+            lines.append(f"[{j}] EN: {seg['text']}")
+        text_block = "\n".join(lines)
+
+        prompt = f"""Below are Dutch subtitle lines (NL) paired with their English translations (EN). Review and fix the English translations:
+- Fix any lines that remained in Dutch or are partially untranslated
+- Fix grammatical errors and incomplete sentences
+- Ensure medical terminology is accurate
+- Do NOT alter these terms: {PROTECTED_TERMS}
+- Keep translations natural and readable as subtitles
+- Maintain the [N] index prefix
+- Output ONLY the corrected English lines (one per [N] index), nothing else
+
+{text_block}"""
+
+        content, _ = call_openrouter(
+            config["model"],
+            [{"role": "user", "content": prompt}],
+            max_tokens=len(chunk) * 100,
+            timeout=180,
+            purpose="subtitle_cleanup",
+            video_id="",
+        )
+
+        parsed = {}
+        for line in content.strip().split("\n"):
+            m = re.match(r"\[(\d+)\]\s*(.*)", line)
+            if m:
+                text = m.group(2)
+                # Strip any "EN: " prefix the model might include
+                text = re.sub(r'^EN:\s*', '', text)
+                parsed[int(m.group(1))] = text
+
+        for j, seg in enumerate(chunk):
+            polished_segments.append({
+                "start": seg["start"],
+                "duration": seg["duration"],
+                "text": parsed.get(j, seg["text"]),
+                "speaker": seg.get("speaker"),
+            })
+
+    translated_segments = polished_segments
+
+    # Filter out non-speech lines ([Music], [Applause], etc.)
+    translated_segments = [
+        seg for seg in translated_segments
+        if not re.match(r'^\s*\[.*\]\s*$', seg['text'])
+        and seg['text'].strip()
+    ]
+
+    # Write VTT file, ensuring no overlapping timestamps
+    with open(vtt_output_path, "w", encoding="utf-8") as f:
+        f.write("WEBVTT\n\n")
+        last_speaker = None
+        for i, seg in enumerate(translated_segments):
+            start = seg["start"]
+            # End at the start of the next segment, or start + duration if last
+            if i + 1 < len(translated_segments):
+                end = min(start + seg["duration"], translated_segments[i + 1]["start"])
+            else:
+                end = start + seg["duration"]
+            # Ensure minimum duration of 0.5s
+            if end - start < 0.5:
+                end = start + 0.5
+            f.write(f"{_format_vtt_time(start)} --> {_format_vtt_time(end)}\n")
+            # Add speaker label when speaker changes
+            speaker = seg.get("speaker")
+            text = seg["text"]
+            if speaker and speaker != "Unknown" and speaker != last_speaker:
+                text = f"[{speaker}] {text}"
+                last_speaker = speaker
+            f.write(f"{text}\n\n")
+
+    if progress_callback:
+        progress_callback(f"Subtitles translated ({len(translated_segments)} lines)")
+
+
+def _format_vtt_time(seconds):
+    """Format seconds as HH:MM:SS.mmm for VTT."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:06.3f}"
+
+
 def build_condensed_transcript(segments):
-    """Group transcript segments into ~30-second blocks with timestamps."""
+    """Group transcript segments into ~30-second blocks with timestamps. Includes speaker labels when available."""
     lines = []
     current_line = []
     current_start = segments[0]["start"]
+    current_speaker = segments[0].get("speaker")
 
     for seg in segments:
-        if seg["start"] - current_start >= 30 and current_line:
+        speaker = seg.get("speaker")
+        # Break on time OR speaker change
+        speaker_changed = speaker and current_speaker and speaker != current_speaker
+        if (seg["start"] - current_start >= 30 or speaker_changed) and current_line:
             minutes = int(current_start) // 60
             seconds = int(current_start) % 60
-            lines.append(f"[{minutes:02d}:{seconds:02d}] {' '.join(current_line)}")
+            prefix = f"[{current_speaker}] " if current_speaker and current_speaker != "Unknown" else ""
+            lines.append(f"[{minutes:02d}:{seconds:02d}] {prefix}{' '.join(current_line)}")
             current_line = []
             current_start = seg["start"]
+            current_speaker = speaker
         current_line.append(seg["text"])
 
     if current_line:
         minutes = int(current_start) // 60
         seconds = int(current_start) % 60
-        lines.append(f"[{minutes:02d}:{seconds:02d}] {' '.join(current_line)}")
+        prefix = f"[{current_speaker}] " if current_speaker and current_speaker != "Unknown" else ""
+        lines.append(f"[{minutes:02d}:{seconds:02d}] {prefix}{' '.join(current_line)}")
 
     return lines
 
@@ -246,86 +591,118 @@ def log_api_call(model, purpose, video_id, usage, pricing):
     return entry.get("estimated_cost", 0)
 
 
+def _is_retryable_error(error_str):
+    """Check if an API error is a transient provider issue worth retrying."""
+    retryable = ["502", "503", "provider_unavailable", "Network connection lost",
+                 "connection reset", "Connection reset", "RemoteDisconnected"]
+    return any(r in error_str for r in retryable)
+
+
 def call_openrouter(model, messages, max_tokens, timeout=300, purpose="", video_id="",
                     progress_callback=None, progress_label=""):
-    """Make a streaming OpenRouter API call with live progress and stall detection."""
+    """Make a streaming OpenRouter API call with live progress, stall detection, and retry."""
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set in environment")
 
-    response = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={"model": model, "messages": messages, "max_tokens": max_tokens, "stream": True},
-        timeout=(15, timeout),  # (connect timeout, read timeout)
-        stream=True,
-    )
-
-    if response.status_code != 200:
-        try:
-            err = response.json()
-        except Exception:
-            err = response.text
-        raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {err}")
-
-    content_parts = []
-    token_count = 0
-    last_token_time = time.time()
-    stall_limit = 60  # seconds with no tokens before we consider it dead
-
     label = progress_label or purpose or "API call"
+    max_retries = 3
+    last_error = None
 
-    for line in response.iter_lines(decode_unicode=True):
-        if not line:
-            continue
-        if line.startswith("data: "):
-            payload = line[6:]
-            if payload.strip() == "[DONE]":
-                break
-            try:
-                chunk = json.loads(payload)
-                if "error" in chunk:
-                    raise RuntimeError(f"OpenRouter stream error: {chunk['error']}")
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                text = delta.get("content", "")
-                if text:
-                    content_parts.append(text)
-                    token_count += len(text.split())  # rough word-based estimate
-                    last_token_time = time.time()
-                    if progress_callback and token_count % 20 == 0:
-                        progress_callback(f"{label} ({token_count:,} tokens)")
-            except json.JSONDecodeError:
-                continue
+    for attempt in range(max_retries):
+        if attempt > 0 and progress_callback:
+            progress_callback(f"{label} (retry {attempt + 1}/{max_retries} after provider error)")
+            time.sleep(30)  # wait before retry
 
-        # Check for stall
-        if time.time() - last_token_time > stall_limit and token_count > 0:
-            raise RuntimeError(
-                f"API stopped responding after {token_count:,} tokens "
-                f"({int(time.time() - last_token_time)}s since last token)"
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": model, "messages": messages, "max_tokens": max_tokens, "stream": True},
+                timeout=(15, timeout),
+                stream=True,
             )
 
-    content = "".join(content_parts)
-    if not content.strip():
-        raise RuntimeError(f"OpenRouter returned empty response for {purpose}")
+            if response.status_code != 200:
+                try:
+                    err = response.json()
+                except Exception:
+                    err = response.text
+                err_str = str(err)
+                if _is_retryable_error(err_str) and attempt < max_retries - 1:
+                    last_error = RuntimeError(f"OpenRouter HTTP {response.status_code}: {err}")
+                    continue
+                raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {err}")
 
-    if progress_callback:
-        progress_callback(f"{label} (complete, ~{token_count:,} tokens)")
+            content_parts = []
+            token_count = 0
+            last_token_time = time.time()
+            stall_limit = 60
 
-    # Build usage dict from token count estimate (streaming doesn't always return usage)
-    # Use rough 0.75 words-per-token ratio to estimate
-    est_output_tokens = int(token_count / 0.75)
-    prompt_text = "".join(m.get("content", "") for m in messages)
-    est_input_tokens = int(len(prompt_text.split()) / 0.75)
-    usage = {"prompt_tokens": est_input_tokens, "completion_tokens": est_output_tokens}
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    payload = line[6:]
+                    if payload.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                        if "error" in chunk:
+                            err_str = str(chunk["error"])
+                            if _is_retryable_error(err_str) and attempt < max_retries - 1:
+                                last_error = RuntimeError(f"OpenRouter stream error: {chunk['error']}")
+                                raise last_error  # break out to retry loop
+                            raise RuntimeError(f"OpenRouter stream error: {chunk['error']}")
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        text = delta.get("content", "")
+                        if text:
+                            content_parts.append(text)
+                            token_count += len(text.split())
+                            last_token_time = time.time()
+                            if progress_callback and token_count % 20 == 0:
+                                progress_callback(f"{label} ({token_count:,} tokens)")
+                    except json.JSONDecodeError:
+                        continue
 
-    # Log with live pricing
-    pricing = get_pricing(model)
-    log_api_call(model, purpose, video_id, usage, pricing)
+                if time.time() - last_token_time > stall_limit and token_count > 0:
+                    raise RuntimeError(
+                        f"API stopped responding after {token_count:,} tokens "
+                        f"({int(time.time() - last_token_time)}s since last token)"
+                    )
 
-    return content, usage
+            content = "".join(content_parts)
+            if not content.strip():
+                raise RuntimeError(f"OpenRouter returned empty response for {purpose}")
+
+            if progress_callback:
+                progress_callback(f"{label} (complete, ~{token_count:,} tokens)")
+
+            est_output_tokens = int(token_count / 0.75)
+            prompt_text = "".join(m.get("content", "") for m in messages)
+            est_input_tokens = int(len(prompt_text.split()) / 0.75)
+            usage = {"prompt_tokens": est_input_tokens, "completion_tokens": est_output_tokens}
+
+            pricing = get_pricing(model)
+            log_api_call(model, purpose, video_id, usage, pricing)
+
+            return content, usage
+
+        except RuntimeError as e:
+            if _is_retryable_error(str(e)) and attempt < max_retries - 1:
+                last_error = e
+                continue
+            raise
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if attempt < max_retries - 1:
+                last_error = e
+                continue
+            raise RuntimeError(f"OpenRouter connection failed after {max_retries} attempts: {e}")
+
+    raise last_error or RuntimeError(f"OpenRouter call failed after {max_retries} attempts")
 
 
 def generate_summary(video_id, transcript_lines, config, progress_callback=None, context_hint="", chapters=None,
@@ -375,6 +752,10 @@ TRANSCRIPT:
         progress_callback=progress_callback,
         progress_label="Generating summary",
     )
+
+    # Strip markdown code fences that LLMs sometimes wrap output in
+    content = re.sub(r'^\s*```html\s*\n?', '', content)
+    content = re.sub(r'\n?\s*```\s*$', '', content)
 
     # Fix timestamps: convert [0X:MM:SS] to [X:MM:SS]
     content = re.sub(r'\[0(\d:\d{2}:\d{2})\]', r'[\1]', content)
@@ -561,6 +942,12 @@ def group_chapters(chapters, total_duration, target_minutes=8):
     """Group chapters into batches targeting ~target_minutes per batch."""
     if not chapters:
         return []
+
+    # If the first chapter doesn't start near 0, prepend a synthetic Introduction
+    # chapter so content before the first chapter is not dropped.
+    chapters = list(chapters)
+    if chapters[0]["start"] > 30:
+        chapters.insert(0, {"start": 0.0, "title": "Introduction"})
 
     groups = []
     current_group = []
@@ -889,10 +1276,17 @@ document.addEventListener('click', function(e) {
   var link = e.target.closest('a[target="yt-player"]');
   if (!link) return;
   e.preventDefault();
-  var url = new URL(link.href);
-  var videoId = url.searchParams.get('v');
-  var t = (url.searchParams.get('t') || '0').replace('s', '');
-  var playerUrl = '/player/' + videoId + '#t=' + t;
+  var playerUrl;
+  if (link.href.indexOf('/player/') !== -1) {
+    playerUrl = link.getAttribute('href');
+    var tMatch = playerUrl.match(/#t=(\\d+)/);
+    var t = tMatch ? tMatch[1] : '0';
+  } else {
+    var url = new URL(link.href);
+    var videoId = url.searchParams.get('v');
+    var t = (url.searchParams.get('t') || '0').replace('s', '');
+    playerUrl = '/player/' + videoId + '#t=' + t;
+  }
   try {
     if (playerWindow && !playerWindow.closed) {
       if (typeof playerWindow.seekTo === 'function') {
@@ -974,9 +1368,19 @@ SUMMARY_CSS = """
 
 def wrap_summary_html(video_title, summary_content, video_id, duration_str, cost_str):
     """Wrap summary content in a full HTML page."""
-    badge_html = f"""<div>
+    is_local = video_id.startswith("local_")
+    player_url = f"/player/{video_id}"
+    if is_local:
+        badge_html = f"""<div>
   <span class="meta-badge">Duration: {duration_str}</span>
-  <span class="meta-badge">Cost: {cost_str}</span>
+  <span class="meta-badge"><a href="{player_url}" target="video-player" style="color: #2980b9; text-decoration: none;">Watch Locally</a></span>
+</div>"""
+    else:
+        yt_url = f"https://www.youtube.com/watch?v={video_id}"
+        badge_html = f"""<div>
+  <span class="meta-badge">Duration: {duration_str}</span>
+  <span class="meta-badge"><a href="{player_url}" target="video-player" style="color: #2980b9; text-decoration: none;">Watch Locally</a></span>
+  <span class="meta-badge"><a href="{yt_url}" target="_blank" style="color: #2980b9; text-decoration: none;">Watch on YouTube</a></span>
 </div>"""
     # Insert badges after the first </h1> so they appear below the title
     summary_content = summary_content.replace("</h1>", f"</h1>\n{badge_html}", 1)
@@ -1047,7 +1451,333 @@ def make_unique_dir(parent, name):
         counter += 1
 
 
-def process_video(video_id, progress_callback=None, context_hint="", category=""):
+def _ensure_cuda_dlls():
+    """Add nvidia pip package DLL paths to Windows DLL search directories."""
+    import os
+    # Force only RTX 3060 Ti (GPU 0), hide Quadro P620 which is incompatible with cuDNN
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    site_packages = Path(__file__).parent / "venv" / "Lib" / "site-packages" / "nvidia"
+    if site_packages.exists():
+        for sub in site_packages.iterdir():
+            bin_dir = sub / "bin"
+            if bin_dir.exists():
+                os.add_dll_directory(str(bin_dir))
+
+
+HF_TOKEN = "***REMOVED***"
+
+
+def diarize_audio(audio_path, progress_callback=None):
+    """Run speaker diarization on an audio/video file using pyannote. Returns list of {start, end, speaker}."""
+    _ensure_cuda_dlls()
+    import torch
+    from pyannote.audio import Pipeline
+
+    if progress_callback:
+        progress_callback("Loading speaker diarization model...")
+    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=HF_TOKEN)
+    pipeline.to(torch.device("cuda"))
+
+    if progress_callback:
+        progress_callback("Loading audio for speaker identification...")
+
+    # Load audio via av (torchaudio/torchcodec broken on Windows)
+    import av
+    import numpy as np
+    container = av.open(str(audio_path))
+    audio_stream = container.streams.audio[0]
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+    frames = []
+    for frame in container.decode(audio_stream):
+        resampled = resampler.resample(frame)
+        for r in resampled:
+            array = r.to_ndarray()
+            frames.append(array)
+    container.close()
+    raw = np.concatenate(frames, axis=1).astype(np.float32) / 32768.0
+    waveform = torch.from_numpy(raw)  # (1, samples)
+
+    if progress_callback:
+        progress_callback("Identifying speakers...")
+    result = pipeline({"waveform": waveform, "sample_rate": 16000})
+    annotation = result.speaker_diarization
+
+    segments = []
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
+        segments.append({
+            "start": turn.start,
+            "end": turn.end,
+            "speaker": speaker,
+        })
+
+    # Build a consistent speaker mapping (SPEAKER_00 -> Speaker 1, etc.)
+    speakers_seen = {}
+    for seg in segments:
+        if seg["speaker"] not in speakers_seen:
+            speakers_seen[seg["speaker"]] = f"Speaker {len(speakers_seen) + 1}"
+        seg["speaker"] = speakers_seen[seg["speaker"]]
+
+    if progress_callback:
+        progress_callback(f"Identified {len(speakers_seen)} speakers, {len(segments)} segments")
+
+    return segments
+
+
+def merge_transcript_with_speakers(transcript_segments, diarization_segments):
+    """Tag each transcript segment with a speaker label from diarization."""
+    for tseg in transcript_segments:
+        mid = tseg["start"] + tseg["duration"] / 2
+        best_speaker = None
+        best_overlap = 0
+        for dseg in diarization_segments:
+            overlap_start = max(tseg["start"], dseg["start"])
+            overlap_end = min(tseg["start"] + tseg["duration"], dseg["end"])
+            overlap = max(0, overlap_end - overlap_start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = dseg["speaker"]
+        tseg["speaker"] = best_speaker or "Unknown"
+    return transcript_segments
+
+
+def transcribe_local_audio(audio_path, language="nl", progress_callback=None, model=None):
+    """Transcribe a local audio/video file using faster-whisper. Returns segments in {start, duration, text} format.
+
+    Pass a preloaded WhisperModel to avoid reloading between videos.
+    """
+    if model is None:
+        _ensure_cuda_dlls()
+        from faster_whisper import WhisperModel
+        if progress_callback:
+            progress_callback("Loading Whisper model (large-v3-turbo)...")
+        model = WhisperModel("large-v3-turbo", device="cuda", compute_type="default")
+
+    if progress_callback:
+        progress_callback(f"Transcribing audio ({language})...")
+
+    segments_iter, info = model.transcribe(
+        str(audio_path),
+        language=language,
+        vad_filter=True,
+        condition_on_previous_text=True,
+    )
+
+    segments = []
+    for seg in segments_iter:
+        text = (seg.text or "").strip()
+        if not text:
+            continue
+        segments.append({
+            "start": float(seg.start),
+            "duration": float(seg.end - seg.start),
+            "text": text,
+        })
+        if progress_callback and len(segments) % 50 == 0:
+            progress_callback(f"Transcribed {len(segments)} segments so far...")
+
+    if progress_callback:
+        progress_callback(f"Transcription complete: {len(segments)} segments")
+
+    return segments
+
+
+def process_local_video(file_path, title, category="Uncategorized", source_lang="nl",
+                        progress_callback=None, context_hint="", whisper_model=None):
+    """Process a local video file: transcribe with Whisper, run through summary/translation pipeline,
+    save into library. video_id is synthesized as 'local_<slug>'.
+    """
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Video file not found: {file_path}")
+
+    config = load_config()
+    library_dir = Path(config.get("output_dir", "./library"))
+
+    # Synthesize a deterministic video_id from filename
+    slug = re.sub(r'[^a-zA-Z0-9]+', '_', file_path.stem.lower()).strip('_')[:30]
+    video_id = f"local_{slug}"
+
+    # Build output path
+    cat_dir = library_dir / (category if category else "Uncategorized")
+    safe_title = sanitize_folder_name(title)
+    folder_name = f"{safe_title} [{video_id}]"
+    output_dir = cat_dir / folder_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy the source MP4 into the library as video.mp4
+    video_dest = output_dir / "video.mp4"
+    if not video_dest.exists():
+        if progress_callback:
+            progress_callback(f"Copying video into library ({file_path.stat().st_size // (1024*1024)} MB)...")
+        import shutil
+        shutil.copy2(str(file_path), str(video_dest))
+
+    # Transcribe via Whisper (operates on the copied MP4)
+    segments = transcribe_local_audio(video_dest, language=source_lang,
+                                       progress_callback=progress_callback, model=whisper_model)
+    if not segments:
+        raise ValueError("Whisper returned no segments — audio may be silent or unintelligible")
+
+    # Speaker diarization
+    try:
+        diarization_segments = diarize_audio(video_dest, progress_callback)
+        segments = merge_transcript_with_speakers(segments, diarization_segments)
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"Speaker diarization failed (non-fatal): {e}")
+        for seg in segments:
+            seg["speaker"] = "Unknown"
+
+    duration_secs = int(segments[-1]["start"] + segments[-1]["duration"])
+    duration_str = fmt_ts(duration_secs)
+
+    # Translation hint for non-English sources
+    if source_lang != "en":
+        lang_hint = f"The transcript is in Dutch (Nederlands). Produce ALL output in English. Translate faithfully but naturally."
+        context_hint = f"{lang_hint}\n{context_hint}" if context_hint else lang_hint
+
+    # Build filenames
+    fn_transcript = content_filename("transcript", safe_title, "json")
+    fn_transcript_full = content_filename("transcript_full", safe_title, "html")
+    fn_transcript_edited = content_filename("transcript_edited", safe_title, "html")
+    fn_summary = content_filename("summary", safe_title, "html")
+
+    # Save raw segments
+    with open(output_dir / fn_transcript, "w", encoding="utf-8") as f:
+        json.dump(segments, f, ensure_ascii=False, indent=2)
+
+    # Generate raw transcript HTML
+    if progress_callback:
+        progress_callback("Building raw transcript...")
+    raw_body = generate_raw_transcript_html(video_id, segments, [])
+    raw_html = wrap_transcript_html("Full Transcript", raw_body)
+    with open(output_dir / fn_transcript_full, "w", encoding="utf-8") as f:
+        f.write(raw_html)
+
+    # No-chapters flow: summary + edited transcript chunks
+    chunk_minutes = config.get("chunk_minutes", 10)
+    n_chunks = max(1, int(duration_secs / (chunk_minutes * 60)) + (1 if duration_secs % (chunk_minutes * 60) else 0))
+    total_steps = 1 + n_chunks
+
+    step_state = [0, total_steps]
+
+    def step_callback(msg):
+        if progress_callback:
+            progress_callback(f"Step {step_state[0]}/{step_state[1]}: {msg}")
+
+    transcript_lines = build_condensed_transcript(segments)
+
+    total_input = 0
+    total_output = 0
+
+    step_state[0] = 1
+    summary_content, summary_usage = generate_summary(
+        video_id, transcript_lines, config, step_callback, context_hint,
+        fn_transcript_edited=fn_transcript_edited, fn_transcript_full=fn_transcript_full,
+    )
+    total_input += summary_usage.get("prompt_tokens", 0)
+    total_output += summary_usage.get("completion_tokens", 0)
+
+    edited_paragraphs, edited_usage = generate_edited_transcript(
+        video_id, segments, config, step_callback, context_hint, step_state=step_state
+    )
+    total_input += edited_usage.get("prompt_tokens", 0)
+    total_output += edited_usage.get("completion_tokens", 0)
+
+    # Add 10-minute dividers (same as process_video)
+    edited_parts = []
+    last_10min = -1
+    for para in edited_paragraphs:
+        id_match = re.search(r'id="t(\d+)"', para)
+        if id_match:
+            secs = int(id_match.group(1))
+            current_10min = secs // 600
+            if current_10min > last_10min and secs > 0:
+                last_10min = current_10min
+                edited_parts.append('<hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">')
+        edited_parts.append(para)
+
+    edited_body = "\n".join(edited_parts)
+    edited_html = wrap_transcript_html(
+        "Edited Transcript",
+        edited_body,
+        "This transcript has been cleaned up for readability. Filler words removed, sentences restructured, paragraphs added. Content is preserved faithfully.",
+    )
+    with open(output_dir / fn_transcript_edited, "w", encoding="utf-8") as f:
+        f.write(edited_html)
+
+    # Cost
+    pricing = get_pricing(config["model"])
+    if pricing:
+        est_cost = total_input * pricing["prompt"] + total_output * pricing["completion"]
+    else:
+        est_cost = 0
+    cost_str = f"~${est_cost:.3f}"
+
+    # Save summary HTML
+    summary_html = wrap_summary_html(title, summary_content, video_id, duration_str, cost_str)
+    # Rewrite YouTube timestamp links to local player links
+    summary_html = re.sub(
+        r'href="https://www\.youtube\.com/watch\?v=[^"]*&t=(\d+)s"',
+        rf'href="/player/{video_id}#t=\1"',
+        summary_html,
+    )
+    with open(output_dir / fn_summary, "w", encoding="utf-8") as f:
+        f.write(summary_html)
+
+    # Save metadata with local: true flag
+    meta = {
+        "video_id": video_id,
+        "title": title,
+        "safe_title": safe_title,
+        "local": True,
+        "source_path": str(file_path.resolve()),
+        "url": None,
+        "duration_seconds": duration_secs,
+        "duration_display": duration_str,
+        "processed_at": datetime.now().isoformat(),
+        "last_accessed": datetime.now().isoformat(),
+        "model": config["model"],
+        "tokens": {
+            "total_input": total_input,
+            "total_output": total_output,
+        },
+        "estimated_cost": cost_str,
+        "transcript_segments": len(segments),
+        "chapters": [],
+        "context_hint": context_hint,
+        "source_lang": source_lang,
+        "files": {
+            "summary": fn_summary,
+            "transcript": fn_transcript,
+            "transcript_full": fn_transcript_full,
+            "transcript_edited": fn_transcript_edited,
+        },
+    }
+    with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    # Generate English VTT subtitles for non-English sources
+    if source_lang != "en":
+        try:
+            if progress_callback:
+                progress_callback("Generating English subtitles...")
+            generate_translated_vtt(
+                str(output_dir / fn_transcript),
+                str(output_dir / "subs_en.vtt"),
+                progress_callback,
+            )
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"Subtitle generation failed (non-fatal): {e}")
+
+    if progress_callback:
+        progress_callback("Done!")
+
+    return meta
+
+
+def process_video(video_id, progress_callback=None, context_hint="", category="", source_lang="en"):
     """Full pipeline: fetch transcript, generate all outputs, save to library."""
     config = load_config()
     library_dir = Path(config.get("output_dir", "./library"))
@@ -1056,23 +1786,57 @@ def process_video(video_id, progress_callback=None, context_hint="", category=""
     if progress_callback:
         progress_callback("Fetching video info...")
     title = fetch_video_title(video_id)
+    upload_date = fetch_upload_date(video_id)
 
-    # Build output path: library/category/sanitized_title/
+    # Build output path: library/category/sanitized_title [video_id]/
     cat_dir = library_dir / (category if category else "Uncategorized")
     safe_title = sanitize_folder_name(title)
-    output_dir = make_unique_dir(cat_dir, safe_title)
+    folder_name = f"{safe_title} [{video_id}]"
+    output_dir = cat_dir / folder_name
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fetch transcript
+    # Fetch transcript in source language
     if progress_callback:
-        progress_callback("Fetching transcript...")
-    segments = fetch_transcript(video_id)
+        progress_callback(f"Fetching transcript ({source_lang})...")
+    segments = fetch_transcript(video_id, lang=source_lang)
     duration_secs = int(segments[-1]["start"] + segments[-1]["duration"])
     duration_str = fmt_ts(duration_secs)
+
+    # Also fetch alternate language transcript if source is not English
+    if source_lang != "en":
+        try:
+            if progress_callback:
+                progress_callback("Fetching English transcript...")
+            en_segments = fetch_transcript(video_id, lang="en")
+            en_transcript_fn = content_filename("transcript_en", safe_title, "json")
+            with open(output_dir / en_transcript_fn, "w", encoding="utf-8") as f:
+                json.dump(en_segments, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass  # English auto-subs not always available
+
+    # Add translation hint to context if source is not English
+    if source_lang != "en":
+        lang_hint = f"The transcript is in Dutch (Nederlands). Produce ALL output in English. Translate faithfully but naturally."
+        context_hint = f"{lang_hint}\n{context_hint}" if context_hint else lang_hint
 
     # Fetch chapters
     if progress_callback:
         progress_callback("Fetching chapters...")
     chapters = fetch_chapters(video_id)
+
+    # Heuristic: only use chapter-based flow if chapters are actually useful as
+    # navigation aids. Sparse or partial chapters (e.g. a single "skip to" marker
+    # halfway through) cause large segments of content to be lost or grouped into
+    # oversized LLM calls. Fall back to the no-chapters chunked flow in those cases.
+    if chapters:
+        coverage_ok = chapters[0]["start"] <= 60
+        density_ok = len(chapters) >= 3
+        if not (coverage_ok and density_ok):
+            if progress_callback:
+                progress_callback(
+                    f"Chapters present ({len(chapters)}) but not useful for sectioning; using chunked flow."
+                )
+            chapters = []
 
     # Build filenames from sanitized title
     fn_transcript = content_filename("transcript", safe_title, "json")
@@ -1204,6 +1968,9 @@ def process_video(video_id, progress_callback=None, context_hint="", category=""
 
     # Save summary HTML
     summary_html = wrap_summary_html(title, summary_content, video_id, duration_str, cost_str)
+    if upload_date:
+        date_tag = f'<p style="color: #888; font-size: 0.9em; margin-top: -8px;">Uploaded: {upload_date}</p>'
+        summary_html = summary_html.replace("</h1>", "</h1>\n" + date_tag, 1)
     with open(output_dir / fn_summary, "w", encoding="utf-8") as f:
         f.write(summary_html)
 
@@ -1215,6 +1982,7 @@ def process_video(video_id, progress_callback=None, context_hint="", category=""
         "url": f"https://www.youtube.com/watch?v={video_id}",
         "duration_seconds": duration_secs,
         "duration_display": duration_str,
+        "upload_date": upload_date,
         "processed_at": datetime.now().isoformat(),
         "last_accessed": datetime.now().isoformat(),
         "model": config["model"],
@@ -1226,6 +1994,7 @@ def process_video(video_id, progress_callback=None, context_hint="", category=""
         "transcript_segments": len(segments),
         "chapters": chapters,
         "context_hint": context_hint,
+        "source_lang": source_lang,
         "files": {
             "summary": fn_summary,
             "transcript": fn_transcript,

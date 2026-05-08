@@ -207,12 +207,19 @@ INDEX_HTML = """<!DOCTYPE html>
 
   /* Folders */
   .folder-section { margin-bottom: 24px; }
-  .folder-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: #f0f4f8; border-radius: 8px; margin-bottom: 10px; }
+  .folder-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: #f0f4f8; border-radius: 8px; margin-bottom: 10px; cursor: pointer; user-select: none; }
+  .folder-bar:hover { background: #e7eef5; }
+  .folder-bar .chevron { display: inline-block; width: 12px; color: #6c7a89; font-size: 0.85em; transition: transform 0.15s; }
+  .folder-section.collapsed .folder-bar .chevron { transform: rotate(-90deg); }
   .folder-bar .folder-name { font-weight: 600; color: #2c3e50; font-size: 1.05em; flex: 1; }
   .folder-bar .folder-count { color: #999; font-size: 0.8em; margin-right: 4px; }
   .folder-bar button { background: none; border: none; cursor: pointer; font-size: 0.85em; color: #999; padding: 2px 6px; border-radius: 4px; transition: background 0.15s, color 0.15s; }
   .folder-bar button:hover { background: #e0e0e0; color: #333; }
   .folder-bar .btn-delete:hover { background: #f8d7da; color: #dc3545; }
+  .folder-section.collapsed .folder-content { display: none; }
+  .folder-bar .folder-count { color: #999; font-size: 0.8em; margin-right: 4px; }
+  .library-header .btn-toggle-all { background: none; border: 1px solid #ddd; cursor: pointer; font-size: 0.8em; color: #666; padding: 3px 10px; border-radius: 4px; margin-left: 8px; }
+  .library-header .btn-toggle-all:hover { background: #f0f4f8; color: #2c3e50; }
 
   /* Video cards */
   .video-card { background: #fff; border: 1px solid #e9ecef; border-radius: 8px; padding: 14px 18px; margin-bottom: 8px; transition: box-shadow 0.15s; display: flex; flex-direction: column; gap: 4px; }
@@ -328,18 +335,22 @@ INDEX_HTML = """<!DOCTYPE html>
 <div class="library-header">
   <h2>Library</h2>
   <span class="library-count">{{ entries|length }} video{{ 's' if entries|length != 1 else '' }}</span>
+  <button class="btn-toggle-all" onclick="collapseAllCategories()">Collapse all</button>
+  <button class="btn-toggle-all" onclick="expandAllCategories()">Expand all</button>
 </div>
 
 {% if entries %}
   {% for folder_name, folder_entries in grouped_entries %}
-  <div class="folder-section">
-    <div class="folder-bar">
+  <div class="folder-section" data-category="{{ folder_name|e }}">
+    <div class="folder-bar" onclick="toggleCategory(event, '{{ folder_name|e }}')">
+      <span class="chevron">&#9660;</span>
       <span class="folder-name">{{ folder_name }}</span>
       <span class="folder-count">{{ folder_entries|length }}</span>
       {% if folder_name != 'Uncategorized' %}
-      <button onclick="renameCategory('{{ folder_name|e }}')" title="Rename category">&#9998;</button>
+      <button onclick="event.stopPropagation(); renameCategory('{{ folder_name|e }}')" title="Rename category">&#9998;</button>
       {% endif %}
     </div>
+    <div class="folder-content">
     {% for entry in folder_entries %}
     <div class="video-card">
       <div class="card-top">
@@ -349,7 +360,11 @@ INDEX_HTML = """<!DOCTYPE html>
       <div class="video-meta">
         <span>{{ entry.duration_display }}</span>
         <span>{{ entry.processed_at[:10] }}</span>
-        <span>{{ entry.estimated_cost }}</span>
+        {% if entry.video_id.startswith('local_') %}
+        <span style="color: #888;">local</span>
+        {% else %}
+        <a href="{{ entry.url }}" target="_blank" style="color: #2980b9; text-decoration: none;">YouTube</a>
+        {% endif %}
       </div>
       <div class="video-notes">
         <input type="text" value="{{ entry.get('notes', '') }}" placeholder="Add a note..."
@@ -358,6 +373,7 @@ INDEX_HTML = """<!DOCTYPE html>
       </div>
     </div>
     {% endfor %}
+    </div>
   </div>
   {% endfor %}
 {% else %}
@@ -465,6 +481,56 @@ function moveVideo(videoId, folder) {
     body: JSON.stringify({field: 'folder', value: folder})
   }).then(function() { location.reload(); });
 }
+
+var COLLAPSED_KEY = 'ytproc_collapsed_categories';
+
+function getCollapsedSet() {
+  try {
+    var raw = localStorage.getItem(COLLAPSED_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch(e) { return new Set(); }
+}
+
+function setCollapsedSet(set) {
+  try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify(Array.from(set))); } catch(e) {}
+}
+
+function applyCollapseState() {
+  var collapsed = getCollapsedSet();
+  document.querySelectorAll('.folder-section').forEach(function(sec) {
+    var cat = sec.getAttribute('data-category');
+    if (collapsed.has(cat)) sec.classList.add('collapsed');
+    else sec.classList.remove('collapsed');
+  });
+}
+
+function toggleCategory(event, name) {
+  if (event && event.target && event.target.tagName === 'BUTTON') return;
+  var sec = document.querySelector('.folder-section[data-category="' + CSS.escape(name) + '"]');
+  if (!sec) return;
+  var collapsed = getCollapsedSet();
+  if (sec.classList.toggle('collapsed')) collapsed.add(name);
+  else collapsed.delete(name);
+  setCollapsedSet(collapsed);
+}
+
+function collapseAllCategories() {
+  var collapsed = new Set();
+  document.querySelectorAll('.folder-section').forEach(function(sec) {
+    sec.classList.add('collapsed');
+    collapsed.add(sec.getAttribute('data-category'));
+  });
+  setCollapsedSet(collapsed);
+}
+
+function expandAllCategories() {
+  document.querySelectorAll('.folder-section').forEach(function(sec) {
+    sec.classList.remove('collapsed');
+  });
+  setCollapsedSet(new Set());
+}
+
+document.addEventListener('DOMContentLoaded', applyCollapseState);
 
 function renameCategory(oldName) {
   var newName = prompt('Rename category "' + oldName + '" to:', oldName);
@@ -674,6 +740,7 @@ PLAYER_HTML = """<!DOCTYPE html>
   {% if has_video %}
   <video id="vid" controls autoplay>
     <source src="/library/{{ video_id }}/video.mp4" type="video/mp4">
+    {% if has_subs %}<track label="English" kind="subtitles" srclang="en" src="/library/{{ video_id }}/subs_en.vtt" {{ 'default' if subs_default else '' }}>{% endif %}
   </video>
   {% else %}
   <div class="download-box" id="dlBox">
@@ -1176,17 +1243,24 @@ def player(video_id):
     has_video = video_dir is not None and (video_dir / "video.mp4").exists()
 
     title = video_id
+    has_subs = False
+    subs_default = False
+    source_lang = "en"
     if video_dir:
         meta_path = video_dir / "meta.json"
         if meta_path.exists():
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
-                    title = json.load(f).get("title", video_id)
+                    meta = json.load(f)
+                title = meta.get("title", video_id)
+                source_lang = meta.get("source_lang", "en")
             except Exception:
                 pass
+        has_subs = (video_dir / "subs_en.vtt").exists()
+        subs_default = has_subs and source_lang != "en"
 
     _update_last_accessed(video_id)
-    return render_template_string(PLAYER_HTML, video_id=video_id, has_video=has_video, title=title)
+    return render_template_string(PLAYER_HTML, video_id=video_id, has_video=has_video, has_subs=has_subs, subs_default=subs_default, title=title)
 
 
 @app.route("/download/<video_id>", methods=["POST"])
@@ -1296,6 +1370,13 @@ def settings_trim():
 def storage_redirect():
     from flask import redirect
     return redirect("/settings")
+
+
+@app.route("/library")
+@app.route("/library/")
+def library_redirect():
+    from flask import redirect
+    return redirect("/", code=301)
 
 
 @app.route("/add-category", methods=["POST"])

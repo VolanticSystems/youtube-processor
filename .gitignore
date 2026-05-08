@@ -23,3 +23,6 @@ chapters/
 
 # Benchmark temp files
 benchmark_*.html
+
+# Batch run logs
+batch_output.log
