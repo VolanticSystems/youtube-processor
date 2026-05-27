@@ -1618,6 +1618,11 @@ def process_local_video(file_path, title, category="Uncategorized", source_lang=
     if not segments:
         raise ValueError("Whisper returned no segments — audio may be silent or unintelligible")
 
+    # Free Whisper from VRAM before loading pyannote (8GB GPU can't hold both)
+    import gc, torch
+    gc.collect()
+    torch.cuda.empty_cache()
+
     # Speaker diarization
     try:
         diarization_segments = diarize_audio(video_dest, progress_callback)
