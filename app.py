@@ -1136,13 +1136,35 @@ def start_processing():
 
 @app.route("/status/<video_id>")
 def get_status(video_id):
+    def _summary_file_for(vdir):
+        meta_path = vdir / "meta.json"
+        if not meta_path.exists():
+            return None
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            return meta.get("files", {}).get("summary")
+        except Exception:
+            return None
+
     if video_id in jobs:
         job = jobs[video_id]
-        return jsonify({"status": job["status"], "progress": job["progress"], "title": job.get("title", video_id)})
+        resp = {"status": job["status"], "progress": job["progress"], "title": job.get("title", video_id)}
+        if job["status"] == "done":
+            existing = _find_video_dir(video_id)
+            if existing:
+                sf = _summary_file_for(existing)
+                if sf:
+                    resp["summary_file"] = sf
+        return jsonify(resp)
 
     existing = _find_video_dir(video_id)
     if existing and (existing / "meta.json").exists():
-        return jsonify({"status": "done", "progress": "Done!"})
+        resp = {"status": "done", "progress": "Done!"}
+        sf = _summary_file_for(existing)
+        if sf:
+            resp["summary_file"] = sf
+        return jsonify(resp)
     return jsonify({"status": "unknown", "progress": "No job found"})
 
 
@@ -1449,9 +1471,39 @@ def serve_library_file(video_id, filename):
     video_dir = _find_video_dir(video_id)
     if not video_dir:
         return "Video not found", 404
-    if filename == "summary.html":
+    if filename.startswith("summary - ") or filename == "summary.html":
         _update_last_accessed(video_id)
     return send_from_directory(str(video_dir), filename)
+
+
+@app.route("/library/<video_id>/download")
+def download_summary(video_id):
+    from flask import Response
+    from share_export import make_shareable_summary
+    video_dir = _find_video_dir(video_id)
+    if not video_dir:
+        return "Video not found", 404
+    meta_path = video_dir / "meta.json"
+    if not meta_path.exists():
+        return "Meta not found", 404
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    summary_name = meta.get("files", {}).get("summary")
+    if not summary_name:
+        return "No summary file recorded", 404
+    summary_path = video_dir / summary_name
+    if not summary_path.exists():
+        return "Summary file missing on disk", 404
+    with open(summary_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    out = make_shareable_summary(html, video_id)
+    safe_title = meta.get("safe_title") or video_id
+    filename = f"{safe_title}.html"
+    return Response(
+        out,
+        mimetype="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 if __name__ == "__main__":

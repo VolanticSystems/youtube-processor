@@ -1370,10 +1370,12 @@ def wrap_summary_html(video_title, summary_content, video_id, duration_str, cost
     """Wrap summary content in a full HTML page."""
     is_local = video_id.startswith("local_")
     player_url = f"/player/{video_id}"
+    download_url = f"/library/{video_id}/download"
     if is_local:
         badge_html = f"""<div>
   <span class="meta-badge">Duration: {duration_str}</span>
   <span class="meta-badge"><a href="{player_url}" target="video-player" style="color: #2980b9; text-decoration: none;">Watch Locally</a></span>
+  <span class="meta-badge"><a href="{download_url}" style="color: #2980b9; text-decoration: none;">Download for sharing</a></span>
 </div>"""
     else:
         yt_url = f"https://www.youtube.com/watch?v={video_id}"
@@ -1381,6 +1383,7 @@ def wrap_summary_html(video_title, summary_content, video_id, duration_str, cost
   <span class="meta-badge">Duration: {duration_str}</span>
   <span class="meta-badge"><a href="{player_url}" target="video-player" style="color: #2980b9; text-decoration: none;">Watch Locally</a></span>
   <span class="meta-badge"><a href="{yt_url}" target="_blank" style="color: #2980b9; text-decoration: none;">Watch on YouTube</a></span>
+  <span class="meta-badge"><a href="{download_url}" style="color: #2980b9; text-decoration: none;">Download for sharing</a></span>
 </div>"""
     # Insert badges after the first </h1> so they appear below the title
     summary_content = summary_content.replace("</h1>", f"</h1>\n{badge_html}", 1)
