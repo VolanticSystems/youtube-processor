@@ -1167,8 +1167,11 @@ REQUIREMENTS:
 2. Write 2-3 paragraphs providing an overview of the ENTIRE conversation.
 3. For each chapter (or group of closely related chapters), create an <h2> section.
 4. Use the ORIGINAL chapter title EXACTLY as written in the <h2>.
-5. Format: <h2>Original Title <a href="https://www.youtube.com/watch?v={video_id}&t=XXXs" target="yt-player">[timestamp]</a> <span style="font-weight: normal; font-style: italic; font-size: 0.75em; color: #666;">— your brief note</span></h2>
-6. Under each <h2>, refine the provided bullet points into 3-5 <ul><li> items with timestamp links.
+5. H2 heading format (the label inside the link MUST be [MM:SS] rendered from the actual seconds, e.g. 136 seconds -> [2:16]; for durations >= 1 hour use [H:MM:SS]):
+   <h2>Original Title <a href="https://www.youtube.com/watch?v={video_id}&t=XXXs" target="yt-player">[MM:SS]</a> <span style="font-weight: normal; font-style: italic; font-size: 0.75em; color: #666;">— your brief note</span></h2>
+6. Under each <h2>, produce 3-5 <li> items. Each <li> MUST start with its own timestamp link in the same format, pointing at the moment in the source transcript where that specific point is discussed:
+   <li><a href="https://www.youtube.com/watch?v={video_id}&t=XXXs" target="yt-player">[MM:SS]</a> Your insight or point about this bullet.</li>
+   Pick each bullet's timestamp from within the chapter's time range, at the moment that specific point is actually made.
 7. You may group very small adjacent chapters, but keep original titles visible.
 8. Be insightful and opinionated — highlight surprises, controversies, key insights.
 9. Do NOT include transcript dropdowns — they will be added automatically.

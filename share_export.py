@@ -54,6 +54,40 @@ def _rewrite_back_link(html):
     )
 
 
+def _strip_download_badge(html):
+    # The Download for sharing badge points back at our /library/<id>/download
+    # endpoint — useless (and confusing) in the shared copy.
+    return re.sub(
+        r'\s*<span class="meta-badge">\s*<a href="/library/[^"]+/download"[^>]*>Download for sharing</a>\s*</span>',
+        "",
+        html,
+        flags=re.IGNORECASE,
+    )
+
+
+def _format_seconds(total):
+    total = int(total)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"[{h}:{m:02d}:{s:02d}]"
+    return f"[{m}:{s:02d}]"
+
+
+def _rewrite_timestamp_placeholder_labels(html):
+    # <a href="...&t=NNNs" ...>[timestamp]</a>  ->  <a ...>[MM:SS]</a>
+    # Also handles bare literal "timestamp" (no brackets) in case the LLM
+    # rendered it either way.
+    pattern = re.compile(
+        r'(<a\s+href="[^"]*[?&]t=(\d+)s[^"]*"[^>]*>)\s*\[?timestamp\]?\s*(</a>)',
+        flags=re.IGNORECASE,
+    )
+    def _repl(m):
+        secs = int(m.group(2))
+        return f"{m.group(1)}{_format_seconds(secs)}{m.group(3)}"
+    return pattern.sub(_repl, html)
+
+
 def _neutralize_local_player_timestamp_links(html):
     def _repl(m):
         return m.group("label")
@@ -84,8 +118,10 @@ def make_shareable_summary(html, video_id):
     out = _remove_script_block(html)
     out = _strip_yt_player_target(out)
     out = _rewrite_watch_locally_badge(out, video_id)
+    out = _strip_download_badge(out)
     out = _rewrite_back_link(out)
     out = _neutralize_transcript_excerpt_links(out, video_id)
+    out = _rewrite_timestamp_placeholder_labels(out)
     if _is_local(video_id):
         out = _neutralize_local_player_timestamp_links(out)
         out = _add_share_notice(out, _LOCAL_NOTICE)
