@@ -5,3 +5,10 @@ max_summary_tokens: 32000
 max_clean_tokens: 6000
 output_dir: ./library
 port: 5000
+
+# Comma-separated domain vocabulary that must survive translation verbatim.
+# Populate with acronyms, product names, molecule names, gene symbols, etc.
+# Example (biotech): "PPARG, siRNA, IC50, mRNA, PBMC, ELISA"
+# Example (legal):   "SCOTUS, FRCP, Sarbanes-Oxley, mens rea, res judicata"
+# Leave empty to disable term protection.
+protected_terms: ""

@@ -338,7 +338,11 @@ def generate_translated_vtt(transcript_json_path, vtt_output_path, progress_call
             break
 
     config = load_config()
-    PROTECTED_TERMS = "***REMOVED***"
+    # Domain-specific vocabulary that must survive translation verbatim. Pulled
+    # from config.yaml so it can be tuned per deployment without editing code.
+    # Callers with a topic-specific term list should populate config.protected_terms;
+    # per-video overrides can be threaded through context_hint.
+    PROTECTED_TERMS = config.get("protected_terms", "")
 
     # First pass: translate all chunks, collecting two translations per overlapping segment
     translations_a = {}  # segment global index -> text (from first chunk)
