@@ -12,26 +12,27 @@ import yaml
 import yt_dlp
 
 
-# IPVanish SOCKS5 proxy rotation (Europe + US East Coast)
-_PROXY_SERVERS = [
-    "ams", "iad", "lon", "fra", "par", "nyc", "ber", "bru",
-    "mad", "atl", "chi", "dub", "mia", "sto", "vie",
-]
-_PROXY_CREDS = "***REMOVED***"
+# SOCKS5 proxy rotation. Set SOCKS5_PROXIES to a comma-separated list of
+# full URLs, e.g.
+#   export SOCKS5_PROXIES="socks5://user:pass@host1.example.com:1080,socks5://user:pass@host2.example.com:1080"
+# If unset or empty, requests go direct (no proxy).
+_PROXY_URLS = [u.strip() for u in os.environ.get("SOCKS5_PROXIES", "").split(",") if u.strip()]
 _proxy_index = 0
 
 
 def _get_proxy():
-    """Get the current SOCKS5 proxy URL."""
-    global _proxy_index
-    server = _PROXY_SERVERS[_proxy_index % len(_PROXY_SERVERS)]
-    return f"socks5://{_PROXY_CREDS}@{server}.socks.example.com:1080"
+    """Return the current SOCKS5 proxy URL, or None if none configured."""
+    if not _PROXY_URLS:
+        return None
+    return _PROXY_URLS[_proxy_index % len(_PROXY_URLS)]
 
 
 def _rotate_proxy():
-    """Switch to the next proxy server."""
+    """Advance to the next SOCKS5 proxy in the rotation."""
     global _proxy_index
-    _proxy_index = (_proxy_index + 1) % len(_PROXY_SERVERS)
+    if not _PROXY_URLS:
+        return None
+    _proxy_index = (_proxy_index + 1) % len(_PROXY_URLS)
     return _get_proxy()
 
 
@@ -1470,7 +1471,7 @@ def _ensure_cuda_dlls():
                 os.add_dll_directory(str(bin_dir))
 
 
-HF_TOKEN = "***REMOVED***"
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 
 def diarize_audio(audio_path, progress_callback=None):
@@ -1479,6 +1480,12 @@ def diarize_audio(audio_path, progress_callback=None):
     import torch
     from pyannote.audio import Pipeline
 
+    if not HF_TOKEN:
+        raise RuntimeError(
+            "Speaker diarization requires a HuggingFace token. Set the HF_TOKEN "
+            "environment variable to a token with read access, and accept the "
+            "pyannote/speaker-diarization-3.1 model terms on huggingface.co."
+        )
     if progress_callback:
         progress_callback("Loading speaker diarization model...")
     pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=HF_TOKEN)
